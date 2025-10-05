@@ -42,33 +42,34 @@ PublipostageEvalNat/
 └── README.md                  ← Ce fichier
 
 
-🧭 Utilisation rapide
-	1.	Onglet 1 — Paramètres
-	•	Sélectionnez la classe (6A, 4B…), l’année et les fichiers source.
-	•	Option : cochez Mode verbose pour voir les logs détaillés.
-	2.	Onglet 2 — Publipostage
-	•	Le pipeline découpe, fusionne et prépare les fichiers pour l’envoi.
-	3.	Onglet 3 — Message aux parents
-	•	Rédigez le message commun à insérer dans chaque mail.
-	4.	Cliquez sur “C’est parti !”
-	•	Suivez la progression dans la barre prévue à cet effet.
+## 🧭 Utilisation rapide
+	1.	**Onglet 1 — Paramètres
+		-	Sélectionnez la classe (6A, 4B…), l’année et les fichiers source.
+		-	Option : cochez Mode verbose pour voir les logs détaillés.
+	2.	**Onglet 2 — Publipostage
+		-	Le pipeline découpe, fusionne et prépare les fichiers pour l’envoi.
+	3.	**Onglet 3 — Message aux parents
+		-	Rédigez le message commun à insérer dans chaque mail.
+	4.	**Cliquez sur “C’est parti !”
+		-	Suivez la progression dans la barre prévue à cet effet.
 
-💡 Astuces
+## 💡 Astuces
 	•	L’OCR est appliqué automatiquement si le PDF est image uniquement.
 	•	Les accents et prénoms composés sont normalisés automatiquement.
 	•	Les fichiers produits suivent la convention :
 
   Classe_NOM_prénom_Discipline_Année.pdf
 
-  🧱 Distribution
+  ## 🧱 Distribution
 
 L’application peut être distribuée simplement en transmettant le dossier dist/ :
 	•	EvalNat-Publipostage.app (Mac)
-	•	EvalNat-Publipostage.exe (Windows)
+	•	EvalNat-Publipostage.exe (Windows) (demain)
 
 Aucune installation de Python n’est requise.
+## Thunderbird est indispensable. 
 
-🏷️ Version
+## 🏷️ Version
 
 V1 stable — octobre 2025
 Fonctionnalités : GUI complète + pipeline intégré + message parents + barre de progression.
