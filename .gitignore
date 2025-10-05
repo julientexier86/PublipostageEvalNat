@@ -1,0 +1,20 @@
+cat > .gitignore << 'EOF'
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv*/
+.venv/
+env/
+venv/
+
+# PyInstaller
+/build/
+/dist/
+/*.spec
+
+# OS
+.DS_Store
+Thumbs.db
+EOF
