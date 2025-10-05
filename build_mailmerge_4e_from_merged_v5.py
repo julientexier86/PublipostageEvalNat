@@ -78,7 +78,7 @@ def build_catalog(pdf_base: Path):
         div_raw = parts[0]
         annee = parts[-1].strip()
         disc_raw = parts[-2]
-        mid_blocks = parts[1:-2]  # ex: ["VEZIEN GOISNARD", "Luce"] ou ["BACHELIER","Lily-Morgane"]
+        mid_blocks = parts[1:-2]  #
 
         divN = norm_div(div_raw)
         discN = norm_disc(disc_raw)
