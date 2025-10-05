@@ -25,7 +25,7 @@
 2. Décompressez le dossier téléchargé.  
 3. Lancez :
    - Sur **Mac** : `EvalNat-Publipostage.app`
-   - Sur **Windows** : `EvalNat-Publipostage.exe`
+   - Sur **Windows** : `EvalNat-Publipostage.exe` (demain, ou après demain)
 
 > ⚠️ Sur macOS, si l’app est bloquée par Gatekeeper, faites clic droit → *Ouvrir* → *Autoriser*.
 
