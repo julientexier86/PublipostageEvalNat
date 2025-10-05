@@ -1,6 +1,6 @@
 # 🧩 Publipostage ÉvalNat — V1
 
-**Publipostage ÉvalNat** est une application multiplateforme (Mac / Windows) permettant d’automatiser la préparation des **évaluations nationales** (6e – 5e – 4e) à partir des exports PDF et fichiers SIECLE.
+**Publipostage ÉvalNat** est une application multiplateforme (Mac / Windows) permettant d’automatiser la préparation du publipostage des **évaluations nationales** (6e – 5e – 4e) à partir des exports PDF et d'exports SIECLE.
 
 ## 🚀 Fonctionnalités principales
 
