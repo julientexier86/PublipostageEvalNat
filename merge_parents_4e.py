@@ -1,20 +1,50 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-Fusionne les 4 CSV d'extraction Siècle (4A,4B,4C,4D) en un seul fichier:
- - parents_4e_merged.csv  : colonnes normalisées (comme Siècle)
- - parents_4e_mailmerge.csv : + colonne Emails (parents 1 et 2 concaténés, séparés par ;)
-Tolérant aux encodages (utf-8-sig/latin1/cp1252) et aux séparateurs (; ou ,).
-Gère les variantes d'intitulés de colonnes (espaces/accents/casse/petites variations).
-Déduplique par (Nom de famille, Prénom 1, Date de naissance).
+merge_parents_4e.py — Fusion SIECLE robuste (encodage, séparateur, entêtes)
+
+Fonctions principales :
+- Lecture robuste d'un export SIECLE (détection encodage/separateur)
+- Normalisation souple des en-têtes (accents/espaces/casse)
+- Construction d'une colonne 'Emails' en combinant les adresses des représentants
+- Sauvegarde d'un CSV 'parents_4e_merged.csv' (toutes divisions)
+- Sauvegarde d'un CSV filtré sur une classe : 'parents_<CLASSE>_canon.csv'
+
+Utilisation CLI directe :
+  python merge_parents_4e.py /chemin/export.csv --classe 6A --out-dir /chemin/sortie
 """
 
-import sys
+from __future__ import annotations
+import argparse
 import os
+import sys
 import unicodedata
+import re
+from typing import Optional, Tuple, List
+
 import pandas as pd
 
+# ============================
+# Affichage / Logs minimalistes
+# ============================
+def info(msg: str): print(f"[INFO] {msg}")
+def ok(msg: str):   print(f"[OK]  {msg}")
+def warn(msg: str): print(f"[WARN] {msg}")
+def err(msg: str):  print(f"[ERREUR] {msg}", file=sys.stderr)
+
+# ============================
+# Normalisation d'en-têtes
+# ============================
+def strip_accents(s: str) -> str:
+    return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+
+def canon_header(h: str) -> str:
+    h = h.strip()
+    h = strip_accents(h)
+    h = re.sub(r'\s+', ' ', h)
+    return h.lower()
+
+# Colonnes cibles minimales
 TARGET_COLS = [
     "Nom de famille",
     "Prénom 1",
@@ -28,182 +58,161 @@ TARGET_COLS = [
     "Courriel autre repr. légal",
 ]
 
-# Normalisation douce des en-têtes (enlève accents, ponctuation, espaces)
-def norm(s: str) -> str:
-    if s is None:
-        return ""
-    s = str(s).strip()
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    # remplace tout ce qui n'est pas alphanum par rien
-    s = "".join(ch for ch in s if ch.isalnum())
-    return s.lower()
-
-# Dictionnaire de correspondance "header normalisé" -> "nom canonique"
-CANON_MAP = {
-    # Elève
-    "nomdefamille": "Nom de famille",
-    "nomfamille": "Nom de famille",
-    "nom": "Nom de famille",
-    "prenom1": "Prénom 1",
-    "prenom": "Prénom 1",
-    "datedenaissance": "Date de naissance",
-    "naissance": "Date de naissance",
-    "division": "Division",
-
-    # Représentant légal 1
-    "nomdefamillereprlegal": "Nom de famille repr. légal",
-    "nomfamillereprlegal": "Nom de famille repr. légal",
-    "nomreprlegal": "Nom de famille repr. légal",
-    "prenomreprlegal": "Prénom repr. légal",
-    "courrielreprlegal": "Courriel repr. légal",
-    "emailreprlegal": "Courriel repr. légal",
-    "mailreprlegal": "Courriel repr. légal",
-    "adresseelectroniquereprlegal": "Courriel repr. légal",
-
-    # Représentant légal 2 (autre)
-    "nomdefamilleautrereprlegal": "Nom de famille autre repr. légal",
-    "nomfamilleautrereprlegal": "Nom de famille autre repr. légal",
-    "nomautrereprlegal": "Nom de famille autre repr. légal",
-    "prenomautrereprlegal": "Prénom autre repr. légal",
-    "courrielautrereprlegal": "Courriel autre repr. légal",
-    "emailautrereprlegal": "Courriel autre repr. légal",
-    "mailautrereprlegal": "Courriel autre repr. légal",
-    "adresseelectroniqueautrereprlegal": "Courriel autre repr. légal",
+# Synonymes tolérés -> clé canonique
+HEADER_MAP = {
+    # division
+    "division": ["division", "classe"],
+    # nom
+    "nom": ["nom de famille", "nom", "nom eleve", "eleve nom", "nomfamille"],
+    # prénom
+    "prenom": ["prénom 1", "prenom 1", "prénom", "prenom", "eleve prenom", "prenom1"],
+    # emails représentants
+    "email1": ["courriel repr. légal", "courriel repr. legal", "email repr. légal", "mail repr. légal", "adresse électronique repr. légal", "courriel representant legal", "adresseelectroniquereprlegal"],
+    "email2": ["courriel autre repr. légal", "courriel autre repr. legal", "email autre repr. légal", "mail autre repr. légal", "adresse électronique autre repr. légal", "courriel autre representant legal", "adresseelectroniqueautrereprlegal"],
 }
 
-def read_any_csv(path: str) -> pd.DataFrame:
+def find_col(df_cols: List[str], targets: List[str]) -> Optional[str]:
+    """Retourne le nom de colonne original correspondant à une des cibles normalisées."""
+    norm = {canon_header(c): c for c in df_cols}
+    for t in targets:
+        if canon_header(t) in norm:
+            return norm[canon_header(t)]
+    return None
+
+# ============================
+# Lecture robuste du CSV SIECLE
+# ============================
+def read_siecle_csv(path: str) -> Tuple[pd.DataFrame, str, str]:
+    """
+    Essaie plusieurs encodages et séparateurs puis retourne (df, encoding, sep).
+    Logue les entêtes détectées.
+    """
+    encodings = ["utf-8", "utf-8-sig", "cp1252", "latin-1"]
+    seps = [";", ","]
     last_err = None
-    for enc in ("utf-8-sig", "cp1252", "latin1"):
-        try:
-            # sep=None + engine='python' => Sniffer qui détecte ; ou ,
-            df = pd.read_csv(path, sep=None, engine="python", encoding=enc)
-            return df
-        except Exception as e:
-            last_err = e
-    raise RuntimeError(f"Impossible de lire {path}: {last_err}")
+    for enc in encodings:
+        for sep in seps:
+            try:
+                df = pd.read_csv(path, sep=sep, encoding=enc, dtype=str, engine="python")
+                # drop colonnes vides exactes
+                df = df.dropna(how="all", axis=1)
+                # trim
+                df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+                headers = list(df.columns)
+                print(f"Entêtes CSV détectées ({enc}, sep='{sep}') : {headers}")
+                return df, enc, sep
+            except Exception as e:
+                last_err = e
+                continue
+    raise RuntimeError(f"Impossible de lire le CSV '{path}' avec essais {encodings} et seps {seps}.\nDernière erreur: {last_err}")
 
-def standardize_headers(df: pd.DataFrame) -> pd.DataFrame:
-    new_cols = {}
-    for c in df.columns:
-        key = norm(c)
-        target = CANON_MAP.get(key)
-        if target is None:
-            # pas dans la map ? on tente quelques cas particuliers
-            if key.startswith("division"):
-                target = "Division"
-            elif key.startswith("prenom") and "repr" not in key:
-                target = "Prénom 1"
-            else:
-                target = c  # on conserve, mais il ne sera pas pris si non ciblé
-        new_cols[c] = target
-    df = df.rename(columns=new_cols)
-    return df
+# ============================
+# Pipeline de fusion
+# ============================
+def fuse_single(parents_csv: str, classe: Optional[str], out_dir: str) -> Tuple[str, Optional[str]]:
+    if not os.path.isfile(parents_csv):
+        raise FileNotFoundError(f"Fichier parents introuvable: {parents_csv}")
 
-def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
-    for col in TARGET_COLS:
-        if col not in df.columns:
-            df[col] = pd.NA
-    # on ne garde que les colonnes cibles, dans l'ordre
-    return df[TARGET_COLS].copy()
+    # Petit compteur de lignes estimées (sans charger encore)
+    try:
+        est_lines = max(0, sum(1 for _ in open(parents_csv, 'rb')) - 1)
+        print(f"[OK]  -> {os.path.basename(parents_csv)} ({est_lines} lignes estimées)")
+    except Exception:
+        print(f"[OK]  -> {os.path.basename(parents_csv)}")
 
-def clean_values(df: pd.DataFrame) -> pd.DataFrame:
-    # Trim espaces
-    for c in df.columns:
-        if df[c].dtype == object:
-            df[c] = df[c].astype(str).str.strip().replace({"nan": pd.NA})
-    # Dates : laissons le format d’origine (Siècle), on ne force pas l’ISO ici
-    # Division : homogénéiser espaces
-    if "Division" in df.columns:
-        df["Division"] = df["Division"].astype(str).str.strip()
-    return df
+    df, used_enc, used_sep = read_siecle_csv(parents_csv)
+    print(f"[INFO] Lecture CSV: encodage={used_enc}, sep='{used_sep}'")
+    if df.empty:
+        raise ValueError("CSV vide.")
 
-def combine_emails(row) -> str:
+    # Résolution tolérante des colonnes nécessaires
+    col_div = find_col(df.columns, HEADER_MAP["division"])
+    col_nom = find_col(df.columns, HEADER_MAP["nom"])
+    col_pre = find_col(df.columns, HEADER_MAP["prenom"])
+    col_e1  = find_col(df.columns, HEADER_MAP["email1"])
+    col_e2  = find_col(df.columns, HEADER_MAP["email2"])
+
+    # Log debug lisible
+    print(f"Colonnes détectées → Division='{col_div}' | Nom='{col_nom}' | Prénom='{col_pre}'")
+    if not col_div or not col_nom or not col_pre:
+        # Aperçu debug
+        sample = df.head(6).to_csv(sep=used_sep, index=False)
+        print("→ Vérifiez les entêtes (Division/Nom/Prénom) et le séparateur. Aperçu du fichier :")
+        print(sample)
+        raise KeyError(f"Colonnes essentielles manquantes. Résolu: Division='{col_div}' | Nom='{col_nom}' | Prénom='{col_pre}'")
+
+    # Construire Emails combinés
+    def join_emails(a: Optional[str], b: Optional[str]) -> str:
+        parts = []
+        for x in [a, b]:
+            if isinstance(x, str) and x.strip():
+                # Normaliser séparateurs , -> ;
+                parts.extend([p.strip() for p in x.replace(",", ";").split(";") if p.strip()])
+        # dédoublonner
+        out, seen = [], set()
+        for e in parts:
+            le = e.lower()
+            if le not in seen:
+                seen.add(le)
+                out.append(e)
+        return ";".join(out)
+
     emails = []
-    for c in ("Courriel repr. légal", "Courriel autre repr. légal"):
-        v = row.get(c)
-        if pd.notna(v) and str(v).strip():
-            # si le champ comporte déjà plusieurs emails séparés par ;, on garde tel quel
-            parts = [p.strip() for p in str(v).replace(",", ";").split(";") if p.strip()]
-            emails.extend(parts)
-    # dédoublonne en conservant l'ordre
-    seen = set()
-    out = []
-    for e in emails:
-        low = e.lower()
-        if low not in seen:
-            seen.add(low)
-            out.append(e)
-    return ";".join(out)
+    for _, row in df.iterrows():
+        a = row.get(col_e1, "")
+        b = row.get(col_e2, "")
+        emails.append(join_emails(a, b))
+    df["Emails"] = emails
+    non_empty = (df["Emails"].astype(str).str.strip() != "").sum()
+    print(f"[INFO] Emails non vides : {non_empty}/{len(df)}")
 
-def merge_files(paths):
-    frames = []
-    for p in paths:
-        df = read_any_csv(p)
-        df = standardize_headers(df)
-        df = ensure_columns(df)
-        df = clean_values(df)
-        frames.append(df)
+    # Construire DataFrame canonique minimal
+    out_cols = [col_nom, col_pre, col_div, "Emails"]
+    for extra in [col_e1, col_e2]:
+        if extra and extra not in out_cols:
+            out_cols.append(extra)
 
-    merged = pd.concat(frames, ignore_index=True)
-
-    # Déduplication par (Nom, Prénom, Date de naissance)
-    key_cols = ["Nom de famille", "Prénom 1", "Date de naissance"]
-
-    # on regroupe et on combine intelligemment
-    def agg_func(group: pd.DataFrame) -> pd.Series:
-        # premier non-null pour les champs simples
-        res = {}
-        for col in TARGET_COLS:
-            if col in ("Courriel repr. légal", "Courriel autre repr. légal"):
-                # on gardera les deux, mais ici on prend le premier non-null
-                res[col] = group[col].dropna().astype(str).replace({"nan": None}).dropna().head(1).tolist()
-                res[col] = res[col][0] if res[col] else pd.NA
-            else:
-                res[col] = group[col].dropna().astype(str).replace({"nan": None}).dropna().head(1).tolist()
-                res[col] = res[col][0] if res[col] else pd.NA
-        return pd.Series(res)
-
-    merged = merged.groupby(key_cols, dropna=False, as_index=False).apply(agg_func)
-
-    # Colonne Emails (parents 1 + 2)
-    merged["Emails"] = merged.apply(combine_emails, axis=1)
+    df_out = df[out_cols].copy()
+    df_out.rename(columns={
+        col_nom: "Nom de famille",
+        col_pre: "Prénom 1",
+        col_div: "Division",
+        col_e1 if col_e1 else "Courriel repr. légal": "Courriel repr. légal",
+        col_e2 if col_e2 else "Courriel autre repr. légal": "Courriel autre repr. légal",
+    }, inplace=True)
 
     # Sauvegardes
-    merged_std = merged[TARGET_COLS].copy()
-    merged_mail = merged[
-        ["Division", "Nom de famille", "Prénom 1", "Date de naissance",
-         "Courriel repr. légal", "Courriel autre repr. légal", "Emails"]
-    ].copy()
+    os.makedirs(out_dir, exist_ok=True)
+    merged_path = os.path.join(out_dir, "parents_4e_merged.csv")
+    df_out.to_csv(merged_path, sep=";", index=False, encoding="utf-8")
+    ok(f"-> fusion écrite : {merged_path}")
 
-    # Noms de fichiers en sortie (dans le dossier du script)
-    out_std = "parents_4e_merged.csv"
-    out_mail = "parents_4e_mailmerge.csv"
+    filtered_path = None
+    if classe:
+        m = df_out["Division"].astype(str).str.strip().str.upper() == str(classe).strip().upper()
+        df_c = df_out[m].copy()
+        filtered_path = os.path.join(out_dir, f"parents_{str(classe).strip()}_canon.csv")
+        df_c.to_csv(filtered_path, sep=";", index=False, encoding="utf-8")
+        print(f"→ {len(df_c)} lignes 'Division={classe}' dans {filtered_path}")
 
-    merged_std.to_csv(out_std, index=False, encoding="utf-8-sig")
-    merged_mail.to_csv(out_mail, index=False, encoding="utf-8-sig")
+    return merged_path, filtered_path
 
-    print(f"✅ Fusion OK")
-    print(f"   → {out_std} : {len(merged_std)} lignes")
-    print(f"   → {out_mail} : {len(merged_mail)} lignes (avec colonne Emails)")
+# ============================
+# Entrée CLI
+# ============================
+def main():
+    ap = argparse.ArgumentParser(description="Fusionne un export SIECLE vers CSV canoniques (merge + par classe).")
+    ap.add_argument("parents_csv", help="Export SIECLE (CSV unique)")
+    ap.add_argument("--classe", help="Classe à filtrer (ex: 6A)", default=None)
+    ap.add_argument("--out-dir", help="Dossier de sortie", default=".")
+    args = ap.parse_args()
+
+    try:
+        merged, filtered = fuse_single(args.parents_csv, args.classe, args.out_dir)
+        ok("Fusion OK")
+    except Exception as e:
+        err(str(e))
+        sys.exit(1)
 
 if __name__ == "__main__":
-    # Utilisation:
-    #   python merge_parents_4e.py [paths...]
-    # Sans arguments, lit les fichiers par défaut dans le même dossier:
-    #   exportCSVExtraction4A.csv, exportCSVExtraction4B.csv, exportCSVExtraction4C.csv, exportCSVExtraction4D.csv
-    if len(sys.argv) > 1:
-        paths = sys.argv[1:]
-    else:
-        paths = [
-            "exportCSVExtraction4A.csv",
-            "exportCSVExtraction4B.csv",
-            "exportCSVExtraction4C.csv",
-            "exportCSVExtraction4D.csv",
-        ]
-    # vérifie l’existence
-    missing = [p for p in paths if not os.path.exists(p)]
-    if missing:
-        print("⚠️ Fichiers introuvables :", ", ".join(missing))
-        sys.exit(1)
-    merge_files(paths)
+    main()

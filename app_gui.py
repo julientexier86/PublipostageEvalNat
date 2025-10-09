@@ -9,6 +9,25 @@ import sys, os, subprocess, threading, shlex, shutil, re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+# --- Debug logging (helps when the app seems to "bounce" and quit on macOS) ---
+from datetime import datetime
+DEBUG_LOG = os.path.expanduser("~/Library/Logs/PublipostageEVALNAT.log")
+
+def dlog(msg: str):
+    try:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{ts}] {msg}\n"
+        # print to console if launched from terminal
+        try:
+            print(line, end="")
+        except Exception:
+            pass
+        # append to file
+        with open(DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
 # --- Frozen resources (PyInstaller) ----------------------------------------
 def resource_path(relative_path=""):
     """
@@ -80,12 +99,21 @@ def pipeline_binary() -> str | None:
                         os.chmod(c, 0o755)
                 except Exception:
                     pass
+                dlog(f"pipeline_binary: found → {c}")
                 return str(c)
         except Exception:
             continue
 
     # Si rien trouvé : proposer sélection manuelle + tracer où on a cherché (verbose)
     try:
+        # Ne tente pas d'ouvrir des boîtes de dialogue si aucun root Tk n'existe encore
+        try:
+            import tkinter as _tk
+            if getattr(_tk, "_default_root", None) is None:
+                raise RuntimeError("no_tk_root_yet")
+        except Exception:
+            raise
+
         from tkinter import messagebox, filedialog
         messagebox.showwarning(
             "Binaire introuvable",
@@ -100,19 +128,25 @@ def pipeline_binary() -> str | None:
         if fp:
             return fp
     except Exception:
-        pass
+        # En phase d'initialisation (pas encore de root Tk), on reviendra plus tard.
+        return None
 
     # Petit log en console pour aider au debug si lancé en dev
     try:
-        print("[DEBUG] Binaire pipeline introuvable. Chemins testés :")
+        dlog("[DEBUG] Binaire pipeline introuvable. Chemins testés :")
         for c in candidates:
-            print("  -", c)
+            dlog(f"  - {c}")
     except Exception:
         pass
 
     return None
 
-APP_TITLE = "EvalNat – Publipostage"
+APP_TITLE = "PublipostageEVALNAT"
+APP_VERSION = "macOS bundle v1.2"
+
+dlog("=== PublipostageEVALNAT starting ===")
+dlog(f"Python: {sys.version.split()[0]} | Platform: {sys.platform} | Frozen: {getattr(sys, 'frozen', False)}")
+
 DEFAULT_YEAR = "2025-2026"
 
 
@@ -132,11 +166,16 @@ def choose_dir(entry: tk.Entry, title="Choisir un dossier"):
     if path:
         entry.delete(0, tk.END); entry.insert(0, path)
 
-def append_log(text: tk.Text, s: str):
-    text.configure(state="normal")
-    text.insert(tk.END, s)
-    text.see(tk.END)
-    text.configure(state="disabled")
+def append_log(text: tk.Text | None, s: str):
+    if not text:
+        return
+    try:
+        text.configure(state="normal")
+        text.insert(tk.END, s)
+        text.see(tk.END)
+        text.configure(state="disabled")
+    except Exception:
+        pass
 
 def run_async(fn):
     th = threading.Thread(target=fn, daemon=True)
@@ -163,15 +202,11 @@ def build_pipeline_cmd(values: dict) -> list[str]:
     Construit la commande en appelant directement le binaire 'evalnat-pipeline'
     embarqué dans l'app (pas d'interpréteur Python externe requis).
     """
+    dlog(f"build_pipeline_cmd called with values: classe={values.get('classe')} annee={values.get('annee')}")
     pipebin = pipeline_binary()
     if not pipebin:
-        raise FileNotFoundError(
-            "Binaire 'evalnat-pipeline' ou 'pipeline_evalnat' introuvable.\n"
-            "Solutions :\n"
-            " • Copiez l’un des deux (même contenu) dans\n"
-            "   'EvalNat-Publipostage.app/Contents/MacOS/' ou '.../Frameworks/'.\n"
-            " • Ou relancez et choisissez le binaire manuellement quand la boîte s’affiche."
-        )
+        # Laisse l'appelant gérer l'UX (boîte de dialogue déjà prévue côté GUI)
+        raise FileNotFoundError("Binaire pipeline introuvable. Merci de le sélectionner depuis l'onglet Contexte, ou rebuild l'app avec le binaire embarqué.")
 
     args = [pipebin,
             "--classe", values["classe"],
@@ -194,10 +229,15 @@ def build_pipeline_cmd(values: dict) -> list[str]:
         raise ValueError("Aucun CSV SIECLE fourni (onglet Récupération mails parents).")
     args += ["--parents"] + parents_csvs
 
-    # Message commun aux parents (si présent)
+    # Message commun + OBJET
     msg = values.get("message_text")
     if isinstance(msg, str) and msg.strip():
         args += ["--message-text", msg]
+
+    subj = values.get("subject_template")
+    if not isinstance(subj, str) or not subj.strip():
+        subj = "Evaluations nationales - {NOM} {Prénom} ({Classe})"
+    args += ["--subject-template", subj]
 
     # Build & checks (onglet supprimé → valeurs par défaut)
     args += ["--preflight-threshold", "0.8"]
@@ -225,12 +265,15 @@ def build_pipeline_cmd(values: dict) -> list[str]:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        self.withdraw()  # avoid a brief flash; show once ready
+        dlog("App.__init__ entered")
         self.title(APP_TITLE)
         self.geometry("980x720")
+        # Résolution différée du binaire pipeline (après que la fenêtre existe)
+        self._pipebin_path = ""
 
         # valeurs partagées
         self.vars = {
-            "scripts_dir": tk.StringVar(value=FROZEN_BASE),
             "classe": tk.StringVar(value="4D"),
             "annee": tk.StringVar(value=DEFAULT_YEAR),
             "verbose": tk.BooleanVar(value=False),
@@ -238,15 +281,14 @@ class App(tk.Tk):
             # Split
             "input_pdf": tk.StringVar(value=""),
             "out_dir": tk.StringVar(value=""),
-            "keep_accents": tk.BooleanVar(value=True),   # forcé, non affiché
-            "auto_ocr": tk.BooleanVar(value=True),       # forcé, non affiché
             "ocr_lang": tk.StringVar(value="fra"),
             "no_split": tk.BooleanVar(value=False),
 
             # Merge
-            "parents_csvs": [],  # via Listbox
+            "parents_csvs": [],
 
             # Message commun
+            "subject_template": tk.StringVar(value="Evaluations nationales - {NOM} {Prénom} ({Classe})"),
             "message_text": tk.StringVar(value=""),
 
             # TB
@@ -255,352 +297,326 @@ class App(tk.Tk):
             "limit": tk.IntVar(value=0),
             "skip": tk.IntVar(value=0),
             "sleep": tk.DoubleVar(value=0.7),
-            "csv_tb": tk.StringVar(value=""),
             "tb_binary": tk.StringVar(value=""),
         }
 
         self.build_ui()
+        self.log_text = None  # created lazily in Context tab when verbose is toggled
         self._current_step = 1
         self._total_steps = 4
 
+        self.update_idletasks()
+        self.deiconify()
+        dlog("Main window built and deiconified")
+
+        # Résolution tardive du binaire pour éviter tout crash avant mainloop
+        self.after(200, self._late_resolve_pipeline)
+
     def build_ui(self):
+        # En-tête (version + binaire pipeline détecté)
+        header = ttk.Frame(self)
+        header.pack(fill="x", padx=8, pady=(8, 0))
+
+        lbl_title = ttk.Label(header, text=f"{APP_TITLE} — {APP_VERSION}", font=("TkDefaultFont", 11, "bold"))
+        lbl_title.pack(side="left")
+
+        pipe_txt = self._pipebin_path if self._pipebin_path else "binaire pipeline non détecté"
+        self._lbl_pipe = ttk.Label(header, text=f" • Pipeline: {pipe_txt}", foreground="#555555")
+        self._lbl_pipe.pack(side="left", padx=(10, 0))
+
+        # Progression
+        prog_frame = ttk.Frame(header)
+        prog_frame.pack(side="right", padx=6)
+        ttk.Label(prog_frame, text="Progression :").pack(side="left")
+        self.progress = ttk.Progressbar(prog_frame, length=220, mode="determinate", maximum=100)
+        self.progress.pack(side="left", padx=(4, 0))
+
+        # Notebook (5 onglets)
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True, padx=8, pady=8)
 
         # Onglet 0 — Contexte
         f0 = ttk.Frame(nb); nb.add(f0, text="Contexte")
-        self._tab_context(f0)
+        App._tab_context(self, f0)
 
-        # Onglet 1 — Découpage
+        # Onglet 1 — Découpage PDF
         f1 = ttk.Frame(nb); nb.add(f1, text="1) Découpage PDF")
-        self._tab_split(f1)
+        App._tab_split(self, f1)
 
-        # Onglet 2 — Fusion
+        # Onglet 2 — Récupération mails parents
         f2 = ttk.Frame(nb); nb.add(f2, text="2) Récupération mails parents")
-        self._tab_merge(f2)
+        App._tab_parents(self, f2)
 
         # Onglet 3 — Message aux parents
-        f3m = ttk.Frame(nb); nb.add(f3m, text="3) Message aux parents")
-        self._tab_message(f3m)
+        f3 = ttk.Frame(nb); nb.add(f3, text="3) Message aux parents")
+        App._tab_message(self, f3)
 
         # Onglet 4 — Publipostage
-        f5 = ttk.Frame(nb); nb.add(f5, text="4) Publipostage")
-        self._tab_tb(f5)
+        f4 = ttk.Frame(nb); nb.add(f4, text="4) Publipostage")
+        App._tab_tb(self, f4)
 
-        # Zone log OU barre de progression + bouton lancer
-        bottom = ttk.Frame(self); bottom.pack(fill="both", expand=False, padx=8, pady=(0,8))
-        # Widgets de sortie
-        self.log = tk.Text(bottom, height=14, wrap="word", state="disabled")
-        self.sb = ttk.Scrollbar(bottom, command=self.log.yview)
-        self.log.configure(yscrollcommand=self.sb.set)
-        self.progress = ttk.Progressbar(bottom, mode="indeterminate")
-        self.percent = ttk.Label(bottom, text="0%")
+        dlog("UI constructed (tabs + progress)")
 
-        # Cadre boutons
-        buttons_frame = ttk.Frame(self)
-        buttons_frame.pack(pady=(0,10))
-        ttk.Button(buttons_frame, text="Ouvrir le dossier de sortie",
-                   command=lambda: open_path(self.vars["out_dir"].get())).pack(side="left", padx=(0,8))
-        self.btn_run = ttk.Button(buttons_frame, text="C'est parti ▶", command=self.on_run)
-        self.btn_run.pack(side="left")
+    def _tab_context(self, parent: ttk.Frame):
+        frm = parent
+        frm.columnconfigure(1, weight=1)
 
-        # Affichage initial selon 'verbose'
-        self._toggle_verbose()
-        # Reagir au changement de la case 'verbose'
+        # Classe
+        ttk.Label(frm, text="Classe :").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(frm, textvariable=self.vars["classe"], width=12).grid(row=0, column=1, sticky="w", padx=6, pady=4)
+
+        # Année scolaire
+        ttk.Label(frm, text="Année scolaire :").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(frm, textvariable=self.vars["annee"], width=14).grid(row=1, column=1, sticky="w", padx=6, pady=4)
+
+        # Toggle verbose (journal)
+        self.var_verbose_ui = tk.BooleanVar(value=False)
+        def _toggle_verbose():
+            if self.var_verbose_ui.get():
+                # create section if needed
+                if getattr(self, "log_container", None) is None:
+                    self.log_container = ttk.LabelFrame(frm, text="Journal du pipeline (verbose)")
+                    self.log_container.grid(row=10, column=0, columnspan=3, sticky="nsew", padx=6, pady=(8,6))
+                    frm.rowconfigure(10, weight=1)
+                    self.log_text = tk.Text(self.log_container, height=12, wrap="word", state="disabled")
+                    self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
+                else:
+                    self.log_container.grid()
+            else:
+                if getattr(self, "log_container", None) is not None:
+                    self.log_container.grid_remove()
+            self.update_idletasks()
+
+        ttk.Checkbutton(frm, text="Mode verbose (afficher le journal)", variable=self.var_verbose_ui, command=_toggle_verbose)\
+            .grid(row=2, column=1, sticky="w", padx=6, pady=(8,4))
+
+    def _late_resolve_pipeline(self):
         try:
-            self.vars["verbose"].trace_add("write", lambda *args: self._toggle_verbose())
+            path = pipeline_binary()
+            if isinstance(path, str):
+                self._pipebin_path = path
+            else:
+                self._pipebin_path = ""
+        except Exception:
+            self._pipebin_path = ""
+        # Mettre à jour l'étiquette d'en-tête si elle existe
+        try:
+            if hasattr(self, "_lbl_pipe"):
+                pipe_txt = self._pipebin_path if self._pipebin_path else "binaire pipeline non détecté"
+                self._lbl_pipe.configure(text=f" • Pipeline: {pipe_txt}")
         except Exception:
             pass
+        dlog(f"_late_resolve_pipeline: resolved = {self._pipebin_path or 'None'}")
 
-    # -- Tabs -----------------------------------------------------------------
-    def _tab_context(self, f):
-        row=0
-        ttk.Label(f, text="Classe").grid(row=row, column=0, sticky="w")
-        ttk.Entry(f, textvariable=self.vars["classe"], width=10).grid(row=row, column=0, sticky="w", padx=(60,0))
-        ttk.Label(f, text="Année scolaire").grid(row=row, column=0, sticky="w", padx=(150,0))
-        ttk.Entry(f, textvariable=self.vars["annee"], width=14).grid(row=row, column=0, sticky="w", padx=(270,0))
-        row += 1
-        ttk.Checkbutton(
-            f,
-            text="Mode verbose (afficher le log détaillé)",
-            variable=self.vars["verbose"]
-        ).grid(row=row, column=0, sticky="w")
-        f.grid_columnconfigure(0, weight=1)
-    def _toggle_verbose(self):
-        # Nettoyage du frame 'bottom' actuel
-        parent = self.log.master
-        for w in (self.log, self.sb, self.progress, self.percent):
-            try:
-                w.pack_forget()
-            except Exception:
-                pass
-        if self.vars["verbose"].get():
-            # Afficher le log + scrollbar
-            self.log.pack(fill="both", expand=True, side="left")
-            self.sb.pack(side="right", fill="y")
-        else:
-            # Afficher la barre de progression + pourcentage
-            try:
-                self.progress.configure(mode="determinate", maximum=100, value=0)
-            except Exception:
-                pass
-            self.progress.pack(fill="x", expand=True, side="left", padx=(0,6))
-            self.percent.config(text="0%")
-            self.percent.pack(side="left")
+    def _tab_split(self, parent: ttk.Frame):
+        parent.columnconfigure(1, weight=1)
+        ttk.Label(parent, text="PDF source (si découpage) :").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        e_pdf = ttk.Entry(parent, textvariable=self.vars["input_pdf"])
+        e_pdf.grid(row=0, column=1, sticky="ew", padx=6, pady=4)
+        ttk.Button(parent, text="Parcourir…", command=lambda: choose_file(e_pdf, "Choisir le PDF", (("PDF", "*.pdf"), ("Tous", "*.*")))).grid(row=0, column=2, padx=6, pady=4)
 
-    def _set_progress(self, value: float):
+        ttk.Label(parent, text="Dossier de sortie (PDF par élève) :").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        e_out = ttk.Entry(parent, textvariable=self.vars["out_dir"])
+        e_out.grid(row=1, column=1, sticky="ew", padx=6, pady=4)
+        ttk.Button(parent, text="Choisir…", command=lambda: choose_dir(e_out, "Choisir le dossier de sortie")).grid(row=1, column=2, padx=6, pady=4)
+
+        chk = ttk.Checkbutton(parent, text="Ne pas découper (réutiliser les PDFs déjà présents)", variable=self.vars["no_split"])
+        chk.grid(row=2, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(parent, text="Langue OCR :").grid(row=3, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(parent, textvariable=self.vars["ocr_lang"], width=10).grid(row=3, column=1, sticky="w", padx=6, pady=4)
+
+    def _tab_parents(self, parent: ttk.Frame):
+        parent.columnconfigure(1, weight=1)
+        ttk.Label(parent, text="Export SIECLE (CSV) :").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        e_csv = ttk.Entry(parent, textvariable=tk.StringVar(), width=40)
+        e_csv.grid(row=0, column=1, sticky="ew", padx=6, pady=4)
+
+        def _choose():
+            path = filedialog.askopenfilename(title="Choisir le CSV SIECLE", filetypes=[("CSV", "*.csv"), ("Tous", "*.*")])
+            if path:
+                e_csv.delete(0, tk.END); e_csv.insert(0, path)
+                self.vars["parents_csvs"] = [path]
+
+        ttk.Button(parent, text="Parcourir…", command=_choose).grid(row=0, column=2, padx=6, pady=4)
+
+    def _tab_message(self, parent: ttk.Frame):
+        parent.columnconfigure(1, weight=1)
+        ttk.Label(parent, text="Objet (modèle) :").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(parent, textvariable=self.vars["subject_template"]).grid(row=0, column=1, columnspan=2, sticky="ew", padx=6, pady=4)
+
+        ttk.Label(parent, text="Message aux parents :").grid(row=1, column=0, sticky="nw", padx=6, pady=4)
+        self.msg_text = tk.Text(parent, height=12, wrap="word")
+        self.msg_text.grid(row=1, column=1, columnspan=2, sticky="nsew", padx=6, pady=4)
+        parent.rowconfigure(1, weight=1)
+
+        def _sync():
+            self.vars["message_text"].set(self.msg_text.get("1.0", "end-1c"))
+        self.msg_text.bind("<FocusOut>", lambda e: _sync())
+
+        # Right-click context menu (paste/copy/cut)
+        menu = tk.Menu(self.msg_text, tearoff=0)
+        menu.add_command(label="Coller", command=lambda: self.msg_text.event_generate("<<Paste>>"))
+        menu.add_command(label="Copier", command=lambda: self.msg_text.event_generate("<<Copy>>"))
+        menu.add_command(label="Couper", command=lambda: self.msg_text.event_generate("<<Cut>>"))
+        def _popup(e):
+            try:
+                menu.tk_popup(e.x_root, e.y_root)
+            finally:
+                menu.grab_release()
+        self.msg_text.bind("<Button-2>", _popup)  # some macOS configurations
+        self.msg_text.bind("<Button-3>", _popup)
+
+    def _tab_tb(self, parent: ttk.Frame):
+        parent.columnconfigure(1, weight=1)
+
+        ttk.Label(parent, text="Ouvrir automatiquement les brouillons Thunderbird").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Checkbutton(parent, variable=self.vars["run_tb"]).grid(row=0, column=1, sticky="w", padx=6, pady=4)
+
+        # Advanced options toggle
+        self.var_adv = tk.BooleanVar(value=False)
+        def _toggle_adv():
+            if self.var_adv.get():
+                adv_frame.grid(row=2, column=0, columnspan=3, sticky="ew", padx=6, pady=6)
+            else:
+                adv_frame.grid_remove()
+
+        ttk.Checkbutton(parent, text="Options avancées", variable=self.var_adv, command=_toggle_adv)\
+            .grid(row=1, column=0, sticky="w", padx=6, pady=(4,4))
+
+        # Advanced frame (initially hidden)
+        adv_frame = ttk.Frame(parent)
+        adv_frame.grid_remove()
+
+        ttk.Label(adv_frame, text="Chemin Thunderbird (optionnel) :").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        e_tb = ttk.Entry(adv_frame, textvariable=self.vars["tb_binary"])
+        e_tb.grid(row=0, column=1, sticky="ew", padx=6, pady=4)
+        ttk.Button(adv_frame, text="Parcourir…", command=lambda: choose_file(e_tb, "Choisir Thunderbird", (("Thunderbird", "thunderbird*"), ("Tous", "*.*")))).grid(row=0, column=2, padx=6, pady=4)
+
+        ttk.Label(adv_frame, text="Limit / Skip / Sleep (s) :").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        row2 = ttk.Frame(adv_frame); row2.grid(row=1, column=1, sticky="w", padx=6, pady=4)
+        ttk.Entry(row2, width=8, textvariable=self.vars["limit"]).pack(side="left", padx=(0,6))
+        ttk.Entry(row2, width=8, textvariable=self.vars["skip"]).pack(side="left", padx=(0,6))
+        ttk.Entry(row2, width=8, textvariable=self.vars["sleep"]).pack(side="left", padx=(0,6))
+
+        # Run button
+        run_frame = ttk.Frame(parent); run_frame.grid(row=99, column=0, columnspan=3, sticky="ew", padx=6, pady=10)
+        run_frame.columnconfigure(0, weight=1)
+        ttk.Button(run_frame, text="C'est parti", command=self._on_start).grid(row=0, column=0, sticky="ew")
+
+    def _gather_values(self) -> dict:
+        # Assure la synchronisation du Text => StringVar
         try:
-            v = max(0, min(100, float(value)))
-            self.progress.configure(value=v)
-            self.percent.configure(text=f"{int(v)}%")
+            if hasattr(self, "msg_text"):
+                self.vars["message_text"].set(self.msg_text.get("1.0", "end-1c"))
         except Exception:
             pass
+        # parents_csvs is already maintained when choosing the file
+        values = {
+            "classe": self.vars["classe"].get(),
+            "annee": self.vars["annee"].get(),
+            "out_dir": self.vars["out_dir"].get(),
+            "no_split": self.vars["no_split"].get(),
+            "input_pdf": self.vars["input_pdf"].get(),
+            "ocr_lang": self.vars["ocr_lang"].get(),
+            "parents_csvs": self.vars.get("parents_csvs", []),
+            "subject_template": self.vars["subject_template"].get(),
+            "message_text": self.vars["message_text"].get(),
+            "run_tb": self.vars["run_tb"].get(),
+            "dry_run": self.vars["dry_run"].get(),
+            "limit": self.vars["limit"].get(),
+            "skip": self.vars["skip"].get(),
+            "sleep": self.vars["sleep"].get(),
+            "csv_tb": self.vars.get("csv_tb", tk.StringVar(value="")).get() if isinstance(self.vars.get("csv_tb"), tk.Variable) else "",
+            "tb_binary": self.vars["tb_binary"].get(),
+        }
+        return values
 
-    def _reset_progress(self):
+    def _on_start(self):
+        run_async(self._run_pipeline)
+
+    def _run_pipeline(self):
+        # Reset progression
         try:
             self.progress.configure(value=0)
-            self.percent.configure(text="0%")
         except Exception:
             pass
 
-    def _tab_split(self, f):
-        row=0
-        ttk.Checkbutton(f, text="Sauter le découpage (réutiliser un dossier déjà prêt)", variable=self.vars["no_split"]).grid(row=row, column=0, sticky="w"); row+=1
-        ttk.Label(f, text="PDF à découper (export complet)").grid(row=row, column=0, sticky="w"); row+=1
-        e_pdf = ttk.Entry(f, textvariable=self.vars["input_pdf"], width=90); e_pdf.grid(row=row, column=0, sticky="we")
-        ttk.Button(f, text="Choisir PDF…", command=lambda: choose_file(e_pdf, "Choisir un PDF", (("PDF", "*.pdf"), ("Tous", "*.*")))).grid(row=row, column=1, padx=6)
-        row+=1
-        ttk.Label(f, text="Dossier de sortie (pièces jointes par élève)").grid(row=row, column=0, sticky="w"); row+=1
-        e_out = ttk.Entry(f, textvariable=self.vars["out_dir"], width=90); e_out.grid(row=row, column=0, sticky="we")
-        box = ttk.Frame(f); box.grid(row=row, column=1, padx=6, sticky="n")
-        ttk.Button(box, text="Choisir…", command=lambda: choose_dir(e_out, "Choisir un dossier")).pack()
-        ttk.Button(box, text="Ouvrir", command=lambda: open_path(self.vars["out_dir"].get())).pack(pady=(6,0))
-        row+=1
-        ttk.Label(f, text="Langue OCR").grid(row=row, column=0, sticky="w", padx=(260,0))
-        ttk.Entry(f, textvariable=self.vars["ocr_lang"], width=8).grid(row=row, column=0, sticky="w", padx=(340,0))
-        f.grid_columnconfigure(0, weight=1)
-
-    def _tab_merge(self, f):
-        row=0
-        ttk.Label(f, text="Exports SIECLE à fusionner").grid(row=row, column=0, sticky="w"); row+=1
-        self.lb_csvs = tk.Listbox(f, height=6); self.lb_csvs.grid(row=row, column=0, sticky="we")
-        ttk.Button(f, text="Ajouter CSV…", command=lambda: choose_files(self.lb_csvs)).grid(row=row, column=1, padx=6, sticky="n")
-        ttk.Button(f, text="Supprimer sélection", command=self._remove_selected_csvs).grid(row=row, column=1, padx=6, pady=(40,0), sticky="n")
-        row+=1
-        lbl = ttk.Label(
-            f,
-            text="Récupérer le fichier au format CSV dans : Exploitation → Extractions personnalisées → « Adresse mail parents » (par classe : choisissez la classe à exporter).",
-            wraplength=760,
-            justify="left"
-        )
-        lbl.grid(row=row, column=0, columnspan=2, sticky="w", pady=(8,0))
-        f.grid_columnconfigure(0, weight=1)
-
-    def _progress_from_line(self, line: str):
-        """
-        Déduit une progression (%) à partir d'une ligne du stdout du pipeline.
-        Heuristique :
-          - détecte "Étape i/n" → base = (i-1)/n
-          - si "Pages traitées: a / b" pendant l'étape, ajoute la fraction locale
-        """
+        vals = self._gather_values()
         try:
-            step_match = re.search(r"Étape\s+(\d+)\s*/\s*(\d+)", line)
-            if step_match:
-                self._current_step = int(step_match.group(1))
-                self._total_steps = max(1, int(step_match.group(2)))
-                # avance au début de l'étape courante
-                base = (self._current_step - 1) / self._total_steps * 100.0
-                self._set_progress(base)
-                return
-
-            # Progression fine pendant l'étape 1 (découpage) : "Pages traitées: x / y"
-            pages_match = re.search(r"Pages traitées:\s*(\d+)\s*/\s*(\d+)", line)
-            if pages_match:
-                done = int(pages_match.group(1))
-                total = max(1, int(pages_match.group(2)))
-                step = getattr(self, "_current_step", 1)
-                total_steps = getattr(self, "_total_steps", 4)
-                base = (step - 1) / total_steps
-                local = min(1.0, done / total)
-                progress = (base + local / total_steps) * 100.0
-                self._set_progress(progress)
-                return
-
-            # Si on voit "✅ Pipeline terminé" / "✅ Terminé" → 100 %
-            if "✅ Pipeline terminé" in line or "✅ Terminé" in line:
-                self._set_progress(100.0)
-                return
-        except Exception:
-            # En cas d'erreur de parsing, on ne casse pas l'UI
-            pass
-
-    def _tab_message(self, f):
-        row = 0
-        ttk.Label(
-            f,
-            text="Rédigez le message commun aux parents (sera copié dans « CorpsMessage » du mail merge)"
-        ).grid(row=row, column=0, sticky="w"); row += 1
-
-        helper = ttk.Label(
-            f,
-            text="Vous pouvez utiliser des retours à la ligne. Le message sera identique pour tous.",
-            wraplength=760, justify="left"
-        )
-        helper.grid(row=row, column=0, sticky="w", pady=(0,6)); row += 1
-
-        self.txt_message = tk.Text(f, height=12, wrap="word")
-        self.txt_message.grid(row=row, column=0, columnspan=2, sticky="nsew"); row += 1
-
-        btns = ttk.Frame(f); btns.grid(row=row, column=0, sticky="w", pady=(6,0))
-        def _import_message():
-            path = filedialog.askopenfilename(
-                title="Importer un message texte",
-                filetypes=(("Texte", "*.txt"), ("Tous", "*.*"))
-            )
-            if path and os.path.exists(path):
-                try:
-                    with open(path, "r", encoding="utf-8") as fh:
-                        content = fh.read()
-                    self.txt_message.delete("1.0", "end")
-                    self.txt_message.insert("1.0", content)
-                except Exception as e:
-                    messagebox.showerror("Erreur", f"Impossible de lire le fichier :\n{e}")
-        ttk.Button(btns, text="Importer depuis un .txt…", command=_import_message).pack(side="left")
-
-        f.grid_columnconfigure(0, weight=1)
-        f.grid_rowconfigure(2, weight=1)
-
-
-
-    def _tab_tb(self, f):
-        row=0
-        ttk.Checkbutton(f, text="Ouvrir les brouillons Thunderbird", variable=self.vars["run_tb"]).grid(row=row, column=0, sticky="w"); row+=1
-        ttk.Label(f, text="CSV pour TB (optionnel)").grid(row=row, column=0, sticky="w"); row+=1
-        e_tb = ttk.Entry(f, textvariable=self.vars["csv_tb"], width=90); e_tb.grid(row=row, column=0, sticky="we")
-        ttk.Button(f, text="Choisir CSV…", command=lambda: choose_file(e_tb, "Choisir CSV", (("CSV", "*.csv"), ("Tous", "*.*")))).grid(row=row, column=1, padx=6)
-        row+=1
-        ttk.Label(f, text="Binaire Thunderbird (optionnel)").grid(row=row, column=0, sticky="w"); row+=1
-        e_bin = ttk.Entry(f, textvariable=self.vars["tb_binary"], width=90); e_bin.grid(row=row, column=0, sticky="we")
-        ttk.Button(f, text="Choisir exécutable…", command=lambda: choose_file(e_bin, "Choisir Thunderbird")).grid(row=row, column=1, padx=6)
-        f.grid_columnconfigure(0, weight=1)
-
-    def vars_entry(self, entry_widget):
-        return entry_widget
-
-    def _remove_selected_csvs(self):
-        sel = list(self.lb_csvs.curselection())[::-1]
-        for i in sel:
-            self.lb_csvs.delete(i)
-
-    # -- Run ------------------------------------------------------------------
-    def collect_values(self) -> dict:
-        v = {k: var.get() if not isinstance(var, list) else var for k,var in self.vars.items()}
-        v["parents_csvs"] = list(self.lb_csvs.get(0, tk.END))
-        if not v["classe"].strip():
-            raise ValueError("Champ 'Classe' vide.")
-        if not v["annee"].strip():
-            raise ValueError("Champ 'Année' vide.")
-        if not v["out_dir"].strip():
-            raise ValueError("Dossier de sortie des PDFs manquant (onglet Découpage PDF).")
-
-        # Récupération du message multi-ligne (onglet « Message aux parents »)
-        try:
-            if hasattr(self, "txt_message"):
-                v["message_text"] = self.txt_message.get("1.0", "end-1c")
-        except Exception:
-            v["message_text"] = v.get("message_text", "")
-
-        return v
-
-    def on_run(self):
-        try:
-            vals = self.collect_values()
             cmd = build_pipeline_cmd(vals)
+        except Exception as e:
+            messagebox.showerror("Paramétrage incomplet", str(e))
+            return
+
+        append_log(self.log_text, "Commande:\n  " + " ".join(shlex.quote(x) for x in cmd) + "\n\n")
+        dlog("Launching pipeline: " + " ".join(cmd))
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=os.environ.copy(),
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+            )
         except FileNotFoundError as e:
-            messagebox.showerror("Binaire introuvable", str(e))
+            messagebox.showerror("Binaire introuvable", f"{e}")
             return
         except Exception as e:
-            messagebox.showerror("Paramètres invalides", str(e))
+            messagebox.showerror("Erreur de lancement", f"{e}")
             return
 
-        self.attributes("-alpha", 0.98)
+        percent_re = re.compile(r"^\[\s*(\d+)%\]")
+        for line in proc.stdout:  # type: ignore[union-attr]
+            if not line:
+                continue
+            append_log(self.log_text, line)
+            m = percent_re.match(line.strip())
+            if m:
+                try:
+                    p = int(m.group(1))
+                    self.progress.configure(value=p)
+                    self.update_idletasks()
+                except Exception:
+                    pass
 
-        # Réinitialiser la barre de progression si non-verbose
-        if not self.vars["verbose"].get():
-            self._reset_progress()
+        rc = proc.wait()
+        if rc == 0:
+            self.progress.configure(value=100)
+            append_log(self.log_text, "\n✅ Terminé sans erreur.\n")
+        else:
+            append_log(self.log_text, f"\n❌ Erreur (code {rc}).\n")
+
+
+if __name__ == "__main__":
+    def _excepthook(exc_type, exc, tb):
         try:
-            self.btn_run.configure(state="disabled")
+            import traceback
+            trace = "".join(traceback.format_exception(exc_type, exc, tb))
+            dlog("UNHANDLED EXCEPTION:\n" + trace)
         except Exception:
             pass
+        # Try to show a dialog if possible
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            if getattr(tk, "_default_root", None) is None:
+                r = tk.Tk(); r.withdraw()
+            messagebox.showerror("Erreur fatale", f"L'application a rencontré une erreur au démarrage :\n{exc}")
+        except Exception:
+            pass
+        os._exit(1)
 
-        def worker(vals_local=vals, cmd_local=cmd):
-            rc = None
-            try:
-                try:
-                    if hasattr(sys, "_MEIPASS"):
-                        os.chdir(FROZEN_BASE)
-                except Exception:
-                    pass
+    sys.excepthook = _excepthook
 
-                if self.vars["verbose"].get():
-                    append_log(self.log, "\n\n" + " ".join(shlex.quote(c) for c in cmd_local) + "\n")
-                try:
-                    bin_path = cmd_local[0]
-                    if os.path.exists(bin_path) and not os.access(bin_path, os.X_OK):
-                        os.chmod(bin_path, 0o755)
-                    if sys.platform.startswith("darwin"):
-                        try:
-                            subprocess.run(["xattr", "-d", "com.apple.quarantine", bin_path], check=False)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                proc = subprocess.Popen(cmd_local,
-                                        stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT,
-                                        text=True)
-                for line in proc.stdout:
-                    if self.vars["verbose"].get():
-                        append_log(self.log, line)
-                    # Mise à jour de la progression (même en mode non-verbose)
-                    try:
-                        self.after(0, self._progress_from_line, line)
-                    except Exception:
-                        pass
-                rc = proc.wait()
-                if self.vars["verbose"].get():
-                    if rc == 0:
-                        append_log(self.log, "\n✅ Terminé sans erreur.\n")
-                    else:
-                        append_log(self.log, f"\n❌ Erreur (code {rc}).\n")
-            except FileNotFoundError as e:
-                if self.vars["verbose"].get():
-                    append_log(self.log, f"\n❌ Fichier introuvable: {e}\n")
-            except Exception as e:
-                if self.vars["verbose"].get():
-                    append_log(self.log, f"\n❌ Exception: {e}\n")
-            finally:
-                try:
-                    if not self.vars["verbose"].get():
-                        # Si succès et pas déjà à 100, on force à 100
-                        if rc == 0:
-                            self._set_progress(100.0)
-                except Exception:
-                    pass
-                # Arrêter la barre de progression si nécessaire
-                try:
-                    self.progress.stop()
-                except Exception:
-                    pass
-                try:
-                    self.btn_run.configure(state="normal")
-                except Exception:
-                    pass
-                self.attributes("-alpha", 1.0)
-
-        run_async(worker)
-
-# --- main --------------------------------------------------------------------
-if __name__ == "__main__":
-    app = App()
-    app.mainloop()
+    try:
+        dlog("Creating App() ...")
+        app = App()
+        dlog("Entering mainloop()")
+        app.mainloop()
+        dlog("Exited mainloop()")
+    except Exception as e:
+        _excepthook(type(e), e, e.__traceback__)
