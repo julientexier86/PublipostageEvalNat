@@ -332,7 +332,7 @@ def ensure_same_year(annee: str):
     if not annee or "-" not in annee:
         raise ValueError(f"Année invalide : {annee}. Exemple attendu: 2025-2026")
 
-def main():
+def run_pipeline(argv_list: list[str] | None = None):
     ap = argparse.ArgumentParser(description="Pipeline EvalNat (orchestration)")
     ap.add_argument("--classe", required=True, help="Ex: 4D")
     ap.add_argument("--annee", required=True, help='Ex: "2025-2026"')
@@ -365,7 +365,7 @@ def main():
     ap.add_argument("--message-text", default=None, help="Texte du message parents à répliquer dans la colonne 'CorpsMessage' pour toutes les lignes")
     ap.add_argument("--message-file", default=None, help="Fichier texte (UTF-8) contenant le message parents à répliquer dans 'CorpsMessage'")
 
-    args = ap.parse_args()
+    args = ap.parse_args(argv_list)
     classe = args.classe
     annee  = args.annee
     out_dir= Path(args.out_dir)
@@ -676,10 +676,11 @@ def main():
             print(f"   • TB: limite d'ouverture = {args.limit}")
     if (Path(mailmerge_csv).exists()):
         print("   → Ouvre ce CSV dans Thunderbird (extension Mail Merge) ou lance le pipeline avec --run-tb.")
+    return 0
 
 if __name__ == "__main__":
     try:
-        main()
+        run_pipeline(None)
     except subprocess.CalledProcessError as e:
         print(f"\n[ERREUR] Commande externe a échoué (code {e.returncode}).", file=sys.stderr)
         sys.exit(e.returncode)
