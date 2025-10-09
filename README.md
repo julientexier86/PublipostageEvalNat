@@ -1,84 +1,210 @@
-# 🧩 Publipostage ÉvalNat — V1
+# PublipostageEVALNAT
 
-**Publipostage ÉvalNat** est une application multiplateforme (Mac / Windows) permettant d’automatiser la préparation du publipostage des **évaluations nationales** (6e – 5e – 4e) à partir des exports PDF et d'exports SIECLE.
+Outil clef-en-main pour préparer l’envoi des **comptes rendus des évaluations nationales** aux responsables légaux :
 
-## 🚀 Fonctionnalités principales
+1. **Découpage PDF** (1 PDF source → 1 PDF par élève, FR/Math)
+2. **Fusion SIECLE** (récupère les emails parents depuis l’export CSV)
+3. **Génération CSV Mail Merge** (objet + message + 2 pièces jointes)
+4. **Ouverture automatique des brouillons** dans **Thunderbird** (extension Mail Merge)
 
-- **Découpage automatique** des PDF d’évaluations (français / mathématiques) par élève  
-- **Fusion automatique** avec le fichier parents issu de SIECLE (`exportCSVExtractionClasse.csv`)  
-- **Génération du publipostage** pour Thunderbird ou autre client mail  
-- **Message personnalisé aux parents** (nouvel onglet dédié dans la V1)  
-- **Interface graphique** claire et simple  
-- **Barre de progression** et mode *verbose* optionnel pour le suivi des étapes  
-- **Aucune dépendance externe** : l’application embarque ses scripts et dépendances Python
+Fonctionne sur **macOS** et **Windows**. Aucune donnée ne quitte votre machine.
 
-## 🖥️ Compatibilité
+---
 
-- macOS 12 (Monterey) ou supérieur  
-- Windows 10 / 11 (64 bits)
+## 📦 Téléchargement (utilisateurs)
 
-## 📦 Installation
+### macOS (recommandé)
+- Téléchargez la dernière **Release** sur GitHub : `PublipostageEVALNAT-macOS-*.zip`
+- Décompressez → ouvrez `PublipostageEVALNAT.app`
+- Si macOS bloque l’ouverture : clic droit → **Ouvrir** (une fois)
 
-### 🧑‍💻 Méthode la plus simple
+### Windows
+- Téléchargez `PublipostageEvalNat-Setup-*.exe`
+- Lancez l’installeur
+- Ouvrez **PublipostageEVALNAT** depuis le menu Démarrer
 
-1. Téléchargez la dernière version depuis l’onglet **Releases** du dépôt.  
-2. Décompressez le dossier téléchargé.  
-3. Lancez :
-   - Sur **Mac** : `EvalNat-Publipostage.app`
-   - Sur **Windows** : `EvalNat-Publipostage.exe` (demain, ou après demain)
+> ⚠️ Pour l’ouverture des brouillons, **Thunderbird** doit être installé (avec l’extension **Mail Merge**).  
+> OCR (optionnel sous Windows) : **Tesseract** avec la langue **fra** pour les PDF scannés.
 
-> ⚠️ Sur macOS, si l’app est bloquée par Gatekeeper, faites clic droit → *Ouvrir* → *Autoriser*.
+---
 
-PublipostageEvalNat/
-├── app_gui.py                 ← Interface principale
-├── pipeline_evalnat.py        ← Pipeline principal (split + merge + mail)
-├── split_4C.py                ← Découpage PDF OCR
-├── merge_parents_4e.py        ← Fusion des CSV parents
-├── tb_mailmerge_mac.py        ← Génération mails (Thunderbird)
-├── tb_mailmerge_open_compose_mac.py
-├── build_mailmerge_4e_from_merged_v5.py
-├── normalize.py               ← Nettoyage des noms/accents
-├── check_links.py             ← Vérification des chemins
-└── README.md                  ← Ce fichier
+## 🧭 Guide rapide (interface)
 
+L’application comporte 5 onglets :
 
-## 🧭 Utilisation rapide
-	1.	**Onglet 1 — Paramètres
-		-	Sélectionnez la classe (6A, 4B…), l’année et les fichiers source.
-		-	Option : cochez Mode verbose pour voir les logs détaillés.
-	2.	**Onglet 2 — Publipostage
-		-	Le pipeline découpe, fusionne et prépare les fichiers pour l’envoi.
-	3.	**Onglet 3 — Message aux parents
-		-	Rédigez le message commun à insérer dans chaque mail.
-	4.	**Cliquez sur “C’est parti !”
-		-	Suivez la progression dans la barre prévue à cet effet.
+1) **Contexte**  
+- **Classe** (ex. `5B`)  
+- **Année scolaire** (ex. `2025-2026`)  
+- **Mode verbose** (option) : affiche le journal du pipeline dans cet onglet
 
-## 💡 Astuces
-	•	L’OCR est appliqué automatiquement si le PDF est image uniquement.
-	•	Les accents et prénoms composés sont normalisés automatiquement.
-	•	Les fichiers produits suivent la convention :
+2) **Découpage PDF**  
+- **PDF source** (si vous souhaitez découper)  
+- **Dossier de sortie** (les PDF par élève y seront créés)  
+- Option **Ne pas découper** si vous avez déjà les PDF individuels  
+- **Langue OCR** (ex. `fra`) — utile uniquement pour des PDF scannés
 
-  Classe_NOM_prénom_Discipline_Année.pdf
+3) **Récupération mails parents**  
+- **Export SIECLE (CSV)** : choisissez le fichier CSV  
+  - Colonnes attendues (noms possibles) :  
+    - `Division`  
+    - `Nom de famille` (ou `Nom 1`)  
+    - `Prénom 1` (ou `Prenom 1`)  
+    - Emails : `Courriel repr. légal` et/ou `Courriel autre repr. légal`  
+  - L’app gère les CSV en `;` (SIECLE) et corrige l’encodage si besoin.
 
-  ## 🧱 Distribution
+4) **Message aux parents**  
+- **Objet (modèle)**, ex. : `Evaluations nationales - {NOM} {Prénom} ({Classe})`  
+- **Message** (clic droit → coller possible)
 
-L’application peut être distribuée simplement en transmettant le dossier dist/ :
-	•	EvalNat-Publipostage.app (Mac)
-	•	EvalNat-Publipostage.exe (Windows) (demain)
+5) **Publipostage**  
+- **Ouvrir automatiquement les brouillons Thunderbird** (ON/OFF)  
+- **Options avancées** (cocher pour afficher) :  
+  - **Chemin de Thunderbird** (si l’app ne le détecte pas)  
+  - **Limit / Skip / Sleep (s)** pour piloter Mail Merge
 
-Aucune installation de Python n’est requise.
-## Thunderbird est indispensable. 
+Cliquez sur **“C’est parti”** pour lancer le pipeline. Une barre de progression s’affiche en haut.
 
-## 🏷️ Version
+---
 
-V1 stable — octobre 2025
-Fonctionnalités : GUI complète + pipeline intégré + message parents + barre de progression.
+## 📨 Détails des fichiers attendus
 
-### 🧰 Méthode avancée (développeurs)
+- **PDF source** : export des évaluations nationales (FR/Math) de la classe  
+- **CSV SIECLE** : export contenant au moins Division/Nom/Prénom et les emails des représentants légaux
 
-Cloner le dépôt et lancer en mode développement :
+La sortie principale est un **CSV Mail Merge** avec colonnes :
+- `Emails` (listes séparées par `;` quand 2 responsables)  
+- `Objet` (d’après le modèle)  
+- `CorpsMessage` (votre texte commun)  
+- `PJ_francais` / `PJ_math` (chemins des PDF trouvés)
+
+---
+
+## 🛠️ Dépannage (FAQ)
+
+- **Thunderbird non détecté (Win)**  
+  → Saisissez le chemin dans Options avancées (ex. `C:\Program Files\Mozilla Thunderbird\thunderbird.exe`).
+
+- **0 brouillon créé (Win)**  
+  → Vérifiez la colonne `Emails` dans `*_with_emails.csv`. Elle ne doit pas être vide.  
+  → L’export SIECLE doit bien contenir au moins un email par élève.
+
+- **PDF scanné (pas de texte)**  
+  → Sous Windows, installez **Tesseract** + le pack **fra** (ou décochez l’OCR et faites un OCR manuel).  
+  → Sous macOS, l’OCR auto est géré si `ocrmypdf` est présent.
+
+- **CSV encodé bizarrement (accents)**  
+  → L’app tente de corriger automatiquement (`latin-1` → `utf-8`).  
+  → Si problème persiste, ouvrez le CSV dans un tableur et exportez en **CSV UTF-8 ;** (point-virgule).
+
+- **Journal / logs**  
+  - Dans l’onglet **Contexte**, cochez **Mode verbose** pour afficher le journal.  
+  - macOS : log fichier `~/Library/Logs/PublipostageEVALNAT.log`.
+
+---
+
+## 👩‍💻 Développement / Build (pour mainteneurs)
+
+### 1) Prérequis
+- Python 3.11+ (testé 3.13)
+- macOS : Xcode CLT recommandés
+- Windows : Inno Setup (si vous faites l’installeur), Tesseract (optionnel)
 
 ```bash
-git clone https://github.com/julientexier86/PublipostageEvalNat.git
-cd PublipostageEvalNat
-python3 app_gui.py
+python -m venv .venv
+source .venv/bin/activate        # (macOS/Linux)
+# ou: .\.venv\Scripts\activate   # (Windows PowerShell)
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+pip install pyinstaller
+```
+
+### 2) Build “pipeline” (binaire CLI)
+```bash
+pyinstaller pipeline_evalnat.py --name pipeline_evalnat --onefile --console
+```
+→ Sortie : `dist/pipeline_evalnat` (macOS/Linux) ou `dist/pipeline_evalnat.exe` (Win)
+
+### 3) Build **app macOS** (GUI + pipeline embarqué)
+Deux options :
+
+**A. Simple (2 étapes)**  
+- Construire le pipeline (étape 2)  
+- Puis :
+  ```bash
+  pyinstaller app_gui.py --windowed --name PublipostageEVALNAT \
+    --add-binary "dist/pipeline_evalnat:."
+  ```
+  → L’app tentera d’embarquer le binaire.  
+  → Zippez `dist/PublipostageEVALNAT.app` pour la release.
+
+**B. Via le fichier `.spec`** (recommandé si fourni dans le dépôt)  
+- Utilisez le `.spec` livré pour garantir l’emplacement du binaire dans `Contents/MacOS/`  
+  ```bash
+  pyinstaller app_mac.spec
+  ```
+
+### 4) Build **installeur Windows**
+- Générez d’abord `dist/pipeline_evalnat.exe` & `dist/PublipostageEVALNAT.exe`  
+- Ouvrez le fichier **Inno Setup** (`*.iss`) inclus dans le dépôt  
+- Build → obtient `PublipostageEvalNat-Setup-*.exe`
+
+> **Note** : on ne commit **jamais** `dist/` ni les `.exe/.app` dans Git. On publie les binaires via **GitHub Releases**.
+
+---
+
+## 🚀 Publier une Release GitHub
+
+```bash
+# Sur la branche main après merge:
+git tag -a v1.4 -m "PublipostageEVALNAT v1.4"
+git push --tags
+```
+
+- GitHub → **Releases** → **Draft a new release** → Tag `v1.4`  
+- Attachez :
+  - `PublipostageEVALNAT-macOS-*.zip`
+  - `PublipostageEvalNat-Setup-*.exe`
+  - (optionnel) `SHA256SUMS.txt`  
+- Renseignez les notes de version (changements, correctifs, etc.)
+
+---
+
+## 🗂️ Structure du dépôt (résumé)
+
+```
+PublipostageEvalNat/
+├─ app_gui.py                  # Interface Tkinter
+├─ pipeline_evalnat.py         # Pipeline CLI (split/merge/mailmerge/TB)
+├─ merge_parents_4e.py         # Fusion exports SIECLE (emails)
+├─ build_mailmerge_*.py        # Construction CSV Mail Merge
+├─ ocr_helper.py               # Détection/installation OCR (Win)
+├─ requirements.txt
+├─ app_mac.spec                # Build macOS .app (si fourni)
+├─ windows_installer.iss       # Script Inno Setup (si fourni)
+└─ README.md
+```
+
+---
+
+## 🔒 Confidentialité
+
+- Aucune donnée n’est envoyée en ligne par l’application.  
+- Les CSV et PDF sont lus et produits **localement**.
+
+---
+
+## 📄 Licence
+
+MIT 
+
+---
+
+## 📝 Historique
+
+- v1.4 : macOS **single app** (GUI + pipeline embarqué), options TB avancées, corrections encodage CSV, sujets dynamiques `{NOM} {Prénom} ({Classe})`, barre de progression, journal “verbose” dans l’onglet Contexte.  
+- v1.3 : première release stable multi-plateforme.
+
+---
+
+### Remerciements
+Merci aux collègues pour les retours et tests ⚡️
